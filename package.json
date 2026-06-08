@@ -1,0 +1,25 @@
+{
+  "name": "video-semantic-search",
+  "private": true,
+  "scripts": {
+    "doctor": "node scripts/doctor.mjs",
+    "predev": "node scripts/doctor.mjs",
+    "dev": "sh scripts/dev.sh",
+    "dev:web": "pnpm --filter @video-semantic-search/web dev",
+    "dev:api": "cd services/api && .venv/bin/uvicorn main:app --reload --port ${API_PORT:-8000}",
+    "build": "pnpm --filter @video-semantic-search/web build",
+    "typecheck": "pnpm --filter @video-semantic-search/web typecheck",
+    "lint": "pnpm --filter @video-semantic-search/web lint",
+    "lint:api": "cd services/api && .venv/bin/ruff check .",
+    "test:api": "cd services/api && .venv/bin/python -m pytest",
+    "check:structure": "cd services/api && .venv/bin/python -m pytest tests/test_structure.py -v",
+    "test:e2e": "pnpm --filter @video-semantic-search/web exec playwright test"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  }
+}
