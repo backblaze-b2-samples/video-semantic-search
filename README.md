@@ -9,7 +9,17 @@ Built on a full-stack TypeScript + Python foundation (Next.js 16 + FastAPI) with
 
 ## What it looks like
 
-> Screenshots pending — capture with the `sample-screenshotter` once the app is running.
+**Dashboard** — index metrics (videos indexed, minutes transcribed, chunks embedded, B2 storage used), a 7-day upload-activity chart, and a recent-videos table.
+
+![Dashboard with index metrics, upload-activity chart, and recent videos](docs/images/dashboard.png)
+
+**Library** — every video ingested into the sample's B2 namespace with its pipeline status, length, chunk count, size, and re-index/delete actions.
+
+![Library listing ingested videos with their transcription and indexing status](docs/images/library.png)
+
+**Search** — a natural-language question returns the exact timestamped moments that answer it, each playable inline by seeking the source video in B2.
+
+![Search results showing timestamped clips that answer a natural-language question](docs/images/search.png)
 
 ## How it works
 
