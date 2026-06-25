@@ -1,4 +1,4 @@
-<!-- last_verified: 2026-05-21 -->
+<!-- last_verified: 2026-06-25 -->
 # Dev Workflows
 
 Engineering workflows for this repo.
@@ -65,6 +65,33 @@ Engineering workflows for this repo.
 ### When to run
 - After behavior change: run relevant subset
 - Before PR: run full suite
+
+### Provider pipeline verification
+
+The default ingest pipeline integration test is mocked and safe for CI:
+
+```bash
+cd services/api
+python -m pytest tests/test_ingest_pipeline_integration.py::test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers
+```
+
+To verify the same path against live B2 + OpenAI providers, configure `.env`
+with `B2_*` and `OPENAI_API_KEY`, install `ffmpeg`, and provide a small speech
+video. If `ANTHROPIC_API_KEY` is present, the test also requests synthesized
+answer output:
+
+```bash
+cd services/api
+RUN_LIVE_INGEST_TEST=1 \
+LIVE_INGEST_VIDEO_PATH=/path/to/small-speech-video.mp4 \
+LIVE_INGEST_QUERY="What is discussed in this video?" \
+python -m pytest tests/test_ingest_pipeline_integration.py::test_live_ingest_pipeline_round_trip_against_providers
+```
+
+The live test uploads the sample under a temporary `live-provider-smoke-*`
+video prefix, runs `ingest.run_pipeline`, confirms `transcript.json`,
+`embeddings.json`, and a scoped search result, then deletes the temporary B2
+objects.
 
 ## Frontend Conventions
 
