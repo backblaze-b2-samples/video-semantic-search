@@ -77,6 +77,7 @@ def create_upload(req: CreateUploadRequest) -> MultipartUpload:
             size_human=humanize_bytes(req.size_bytes),
             content_type=req.content_type,
             created_at=datetime.now(UTC),
+            pending_upload_id=upload_id,
         )
     )
     return MultipartUpload(
@@ -97,12 +98,15 @@ def complete_upload(req: CompleteUploadRequest) -> Video:
         raise ValueError("Video upload is not pending")
     if video.source_key != req.source_key:
         raise ValueError("source_key does not match pending video upload")
+    if video.pending_upload_id != req.upload_id:
+        raise ValueError("upload_id does not match pending video upload")
 
     parts = [{"PartNumber": p.part_number, "ETag": p.etag} for p in req.parts]
     video_store.complete_multipart(req.source_key, req.upload_id, parts)
 
     video.status = VideoStatus.uploaded
     video.error = None
+    video.pending_upload_id = None
     _save(video)
     return video
 

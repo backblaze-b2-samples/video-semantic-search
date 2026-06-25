@@ -260,6 +260,7 @@ def test_complete_upload_rejects_mismatched_source_key(monkeypatch):
     store = _install_memory_video_store(monkeypatch)
     first_upload = _create_pending_upload("First.mp4")
     second_upload = _create_pending_upload("Second.mp4")
+    assert videos_svc.get_video(second_upload.video_id).pending_upload_id == second_upload.upload_id
 
     with pytest.raises(ValueError, match="source_key"):
         videos_svc.complete_upload(
@@ -269,6 +270,20 @@ def test_complete_upload_rejects_mismatched_source_key(monkeypatch):
     assert store.completed_multipart == []
     assert videos_svc.get_video(second_upload.video_id).status == VideoStatus.uploading
     assert videos_svc.get_video(second_upload.video_id).source_key == second_upload.source_key
+
+
+def test_complete_upload_rejects_mismatched_upload_id(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    upload = _create_pending_upload()
+    assert videos_svc.get_video(upload.video_id).pending_upload_id == upload.upload_id
+
+    with pytest.raises(ValueError, match="upload_id"):
+        videos_svc.complete_upload(_completion_request(upload, upload_id="wrong-upload"))
+
+    assert store.completed_multipart == []
+    video = videos_svc.get_video(upload.video_id)
+    assert video.status == VideoStatus.uploading
+    assert video.pending_upload_id == upload.upload_id
 
 
 def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
@@ -332,6 +347,7 @@ def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
     completed = videos_svc.complete_upload(_completion_request(upload))
 
     assert completed.status == VideoStatus.uploaded
+    assert completed.pending_upload_id is None
     assert store.completed_multipart == [
         (
             upload.source_key,

@@ -31,6 +31,7 @@ class Video(BaseModel):
     duration_seconds: float | None = None
     chunk_count: int | None = None
     error: str | None = None
+    pending_upload_id: str | None = None
 
 
 class CreateUploadRequest(BaseModel):

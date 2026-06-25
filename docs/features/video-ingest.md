@@ -35,9 +35,9 @@ Because the browser PUTs to B2 directly, the **bucket CORS policy** must allow `
 ## Edge Cases
 - File exceeds `MAX_VIDEO_SIZE` (5 GB default) → `400`.
 - Completion requires an existing pending upload for the submitted `video_id`,
-  and the submitted `source_key` must match that pending upload's saved
-  `source_key`; mismatches are rejected before multipart completion or metadata
-  mutation.
+  and the submitted `source_key` and `upload_id` must match that pending
+  upload's saved metadata; mismatches are rejected before multipart completion
+  or metadata mutation.
 - A part PUT fails / no ETag exposed → the client surfaces an `ApiError`; call `abort_multipart_upload` to clean up (server-side helper available).
 - Provider keys absent → upload still succeeds; the pipeline leaves the video at `uploaded` with a "configure provider" note (see [Transcription](transcription.md)).
 
