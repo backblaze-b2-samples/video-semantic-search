@@ -33,10 +33,11 @@ async def create_upload_endpoint(req: CreateUploadRequest):
 
 
 @router.post("/videos/uploads/complete", response_model=Video)
-async def complete_upload_endpoint(
-    req: CompleteUploadRequest, background_tasks: BackgroundTasks
-):
-    video = complete_upload(req)
+async def complete_upload_endpoint(req: CompleteUploadRequest, background_tasks: BackgroundTasks):
+    try:
+        video = complete_upload(req)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
     # Kick the transcription/embedding pipeline off the request path.
     background_tasks.add_task(ingest.run_pipeline, video.video_id)
     logger.info("Video upload completed: video_id=%s", video.video_id)

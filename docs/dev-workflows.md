@@ -76,14 +76,17 @@ python -m pytest tests/test_ingest_pipeline_integration.py::test_ingest_pipeline
 ```
 
 To verify the same path against live B2 + OpenAI providers, configure `.env`
-with `B2_*` and `OPENAI_API_KEY`, install `ffmpeg`, and provide a small speech
-video. If `ANTHROPIC_API_KEY` is present, the test also requests synthesized
-answer output:
+with `B2_*` and `OPENAI_API_KEY`, install `ffmpeg`, and place an approved
+speech-video fixture under `services/api/tests/fixtures/live-ingest/`. The
+fixture must be 25 MiB or smaller and use `.mp4`, `.m4v`, `.mov`, or `.webm`;
+the test rejects arbitrary filesystem paths before any B2 or provider call. If
+`ANTHROPIC_API_KEY` is present, the test also requests synthesized answer
+output:
 
 ```bash
 cd services/api
 RUN_LIVE_INGEST_TEST=1 \
-LIVE_INGEST_VIDEO_PATH=/path/to/small-speech-video.mp4 \
+LIVE_INGEST_VIDEO_PATH="$PWD/tests/fixtures/live-ingest/provider-smoke.mp4" \
 LIVE_INGEST_QUERY="What is discussed in this video?" \
 python -m pytest tests/test_ingest_pipeline_integration.py::test_live_ingest_pipeline_round_trip_against_providers
 ```
@@ -91,7 +94,10 @@ python -m pytest tests/test_ingest_pipeline_integration.py::test_live_ingest_pip
 The live test uploads the sample under a temporary `live-provider-smoke-*`
 video prefix, runs `ingest.run_pipeline`, confirms `transcript.json`,
 `embeddings.json`, and a scoped search result, then deletes the temporary B2
-objects.
+objects. External phases are bounded by explicit timeouts; override them with
+`LIVE_INGEST_PHASE_TIMEOUT_SECONDS` and
+`LIVE_INGEST_PIPELINE_TIMEOUT_SECONDS` only when a slower approved fixture
+requires it.
 
 ## Frontend Conventions
 

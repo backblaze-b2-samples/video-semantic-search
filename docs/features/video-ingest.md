@@ -34,6 +34,9 @@ Because the browser PUTs to B2 directly, the **bucket CORS policy** must allow `
 
 ## Edge Cases
 - File exceeds `MAX_VIDEO_SIZE` (5 GB default) → `400`.
+- Completion requires an existing pending upload whose saved `source_key`
+  matches the submitted `video_id`; mismatches are rejected before multipart
+  completion or metadata mutation.
 - A part PUT fails / no ETag exposed → the client surfaces an `ApiError`; call `abort_multipart_upload` to clean up (server-side helper available).
 - Provider keys absent → upload still succeeds; the pipeline leaves the video at `uploaded` with a "configure provider" note (see [Transcription](transcription.md)).
 
@@ -41,8 +44,8 @@ Because the browser PUTs to B2 directly, the **bucket CORS policy** must allow `
 - `pnpm lint && pnpm lint:api && pnpm test:api && pnpm check:structure`
 - Mocked pipeline round-trip:
   `cd services/api && python -m pytest tests/test_ingest_pipeline_integration.py::test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers`
-- Optional live-provider round-trip (also checks synthesized answers when `ANTHROPIC_API_KEY` is set):
-  `cd services/api && RUN_LIVE_INGEST_TEST=1 LIVE_INGEST_VIDEO_PATH=/path/to/small-speech-video.mp4 python -m pytest tests/test_ingest_pipeline_integration.py::test_live_ingest_pipeline_round_trip_against_providers`
+- Optional live-provider round-trip with a vetted fixture in `services/api/tests/fixtures/live-ingest/` (also checks synthesized answers when `ANTHROPIC_API_KEY` is set):
+  `cd services/api && RUN_LIVE_INGEST_TEST=1 LIVE_INGEST_VIDEO_PATH="$PWD/tests/fixtures/live-ingest/provider-smoke.mp4" python -m pytest tests/test_ingest_pipeline_integration.py::test_live_ingest_pipeline_round_trip_against_providers`
 - Manual: add a small `.mp4` from the Library; confirm `source.{ext}` + `meta.json` appear under the video's prefix in the bucket (visible in the Files explorer).
 
 ## Related Docs

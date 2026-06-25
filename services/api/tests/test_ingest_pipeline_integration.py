@@ -13,7 +13,10 @@ import json
 import mimetypes
 import os
 import shutil
+import signal
 import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,27 +44,44 @@ PLACEHOLDER_VALUES = {
     "your_application_key",
     "your-bucket-name",
 }
+LIVE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "live-ingest"
+LIVE_VIDEO_EXTENSIONS = {".m4v", ".mov", ".mp4", ".webm"}
+LIVE_MAX_FIXTURE_BYTES = 25 * 1024 * 1024
+LIVE_DEFAULT_PHASE_TIMEOUT_SECONDS = 120
+LIVE_DEFAULT_PIPELINE_TIMEOUT_SECONDS = 600
 
 
-def _install_memory_video_store(monkeypatch) -> dict[str, dict]:
-    objects: dict[str, dict] = {}
+@dataclass
+class MemoryVideoStore:
+    objects: dict[str, dict] = field(default_factory=dict)
+    video_ids: set[str] = field(default_factory=set)
+    completed_multipart: list[tuple[str, str, list[dict]]] = field(default_factory=list)
+
+
+class LivePhaseTimeoutError(BaseException):
+    pass
+
+
+def _install_memory_video_store(monkeypatch) -> MemoryVideoStore:
+    store = MemoryVideoStore()
 
     def put_json(key: str, payload: dict) -> None:
-        objects[key] = json.loads(json.dumps(payload))
+        serialized = json.loads(json.dumps(payload))
+        store.objects[key] = serialized
+        video_id = serialized.get("video_id")
+        if video_id and key == video_store.meta_key(video_id):
+            store.video_ids.add(video_id)
 
     def get_json(key: str) -> dict | None:
-        if key not in objects:
+        if key not in store.objects:
             return None
-        return json.loads(json.dumps(objects[key]))
+        return json.loads(json.dumps(store.objects[key]))
 
     def list_video_ids() -> list[str]:
-        prefix = f"{settings.video_prefix}videos/"
-        ids = {
-            key[len(prefix) :].split("/", 1)[0]
-            for key in objects
-            if key.startswith(prefix) and "/" in key[len(prefix) :]
-        }
-        return sorted(ids)
+        return sorted(store.video_ids)
+
+    def complete_multipart(key: str, upload_id: str, parts: list[dict]) -> None:
+        store.completed_multipart.append((key, upload_id, parts))
 
     monkeypatch.setattr(video_store, "put_json", put_json)
     monkeypatch.setattr(video_store, "get_json", get_json)
@@ -72,20 +92,151 @@ def _install_memory_video_store(monkeypatch) -> dict[str, dict]:
         "presign_part",
         lambda key, _upload_id, part_number: f"https://b2.example/{key}?part={part_number}",
     )
-    monkeypatch.setattr(video_store, "complete_multipart", lambda *_args: None)
+    monkeypatch.setattr(video_store, "complete_multipart", complete_multipart)
     monkeypatch.setattr(
         video_store,
         "playback_url",
         lambda key: f"https://b2.example/playback/{key}",
     )
-    return objects
+    return store
+
+
+def _completion_request(
+    upload,
+    *,
+    video_id: str | None = None,
+    source_key: str | None = None,
+    upload_id: str | None = None,
+) -> CompleteUploadRequest:
+    return CompleteUploadRequest(
+        video_id=video_id or upload.video_id,
+        source_key=source_key or upload.source_key,
+        upload_id=upload_id or upload.upload_id,
+        title="Provider Demo.mp4",
+        size_bytes=16,
+        content_type="video/mp4",
+        parts=[CompletedPart(part_number=1, etag='"etag-1"')],
+    )
+
+
+def _create_pending_upload(filename: str = "Provider Demo.mp4"):
+    return videos_svc.create_upload(
+        CreateUploadRequest(
+            filename=filename,
+            size_bytes=16,
+            content_type="video/mp4",
+        )
+    )
+
+
+def _live_timeout_seconds(env_name: str, default: int) -> int:
+    raw = os.getenv(env_name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        pytest.fail(f"{env_name} must be an integer number of seconds.")
+    if value <= 0:
+        pytest.fail(f"{env_name} must be greater than zero.")
+    return value
+
+
+@contextmanager
+def _live_phase_deadline(phase: str, seconds: int):
+    if not hasattr(signal, "SIGALRM"):
+        pytest.fail("Live provider smoke test requires signal.SIGALRM for deadlines.")
+
+    def timeout_handler(_signum, _frame):
+        raise LivePhaseTimeoutError(f"Timed out after {seconds}s while {phase}.")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    except LivePhaseTimeoutError as exc:
+        pytest.fail(str(exc))
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _validated_live_fixture() -> tuple[Path, str]:
+    sample = os.getenv("LIVE_INGEST_VIDEO_PATH")
+    if not sample:
+        pytest.skip(
+            "Set LIVE_INGEST_VIDEO_PATH to an approved small speech video under "
+            f"{LIVE_FIXTURE_DIR}."
+        )
+
+    try:
+        path = Path(sample).expanduser().resolve(strict=True)
+    except FileNotFoundError:
+        pytest.fail(f"LIVE_INGEST_VIDEO_PATH does not exist: {sample}")
+
+    fixture_dir = LIVE_FIXTURE_DIR.resolve()
+    if not path.is_relative_to(fixture_dir):
+        pytest.fail(f"LIVE_INGEST_VIDEO_PATH must point to a vetted fixture under {fixture_dir}.")
+    if not path.is_file():
+        pytest.fail(f"LIVE_INGEST_VIDEO_PATH must be a regular file: {path}")
+    if path.suffix.lower() not in LIVE_VIDEO_EXTENSIONS:
+        pytest.fail(
+            "LIVE_INGEST_VIDEO_PATH must use one of these extensions: "
+            + ", ".join(sorted(LIVE_VIDEO_EXTENSIONS))
+        )
+
+    size_bytes = path.stat().st_size
+    if size_bytes <= 0:
+        pytest.fail("LIVE_INGEST_VIDEO_PATH must not be empty.")
+    if size_bytes > LIVE_MAX_FIXTURE_BYTES:
+        pytest.fail("LIVE_INGEST_VIDEO_PATH must be 25 MiB or smaller before upload.")
+
+    content_type = mimetypes.guess_type(path.name)[0] or ""
+    if not content_type.startswith("video/"):
+        pytest.fail("LIVE_INGEST_VIDEO_PATH must resolve to a video MIME type.")
+    return path, content_type
+
+
+def test_complete_upload_rejects_missing_pending_metadata(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    request = CompleteUploadRequest(
+        video_id="missing-video",
+        source_key=video_store.source_key("missing-video"),
+        upload_id="upload-1",
+        title="Missing.mp4",
+        size_bytes=16,
+        content_type="video/mp4",
+        parts=[CompletedPart(part_number=1, etag='"etag-1"')],
+    )
+
+    with pytest.raises(ValueError, match="Pending video upload not found"):
+        videos_svc.complete_upload(request)
+
+    assert store.completed_multipart == []
+    assert video_store.get_json(video_store.meta_key("missing-video")) is None
+
+
+def test_complete_upload_rejects_mismatched_source_key(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    first_upload = _create_pending_upload("First.mp4")
+    second_upload = _create_pending_upload("Second.mp4")
+
+    with pytest.raises(ValueError, match="source_key"):
+        videos_svc.complete_upload(
+            _completion_request(second_upload, source_key=first_upload.source_key)
+        )
+
+    assert store.completed_multipart == []
+    assert videos_svc.get_video(second_upload.video_id).status == VideoStatus.uploading
+    assert videos_svc.get_video(second_upload.video_id).source_key == second_upload.source_key
 
 
 def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
     monkeypatch,
     tmp_path,
 ):
-    objects = _install_memory_video_store(monkeypatch)
+    store = _install_memory_video_store(monkeypatch)
     source_path = tmp_path / "source.mp4"
     audio_path = tmp_path / "audio.m4a"
     source_path.write_bytes(b"fake video bytes")
@@ -138,26 +289,17 @@ def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
         lambda question, clips: "Artifacts are stored in Backblaze B2.",
     )
 
-    upload = videos_svc.create_upload(
-        CreateUploadRequest(
-            filename="Provider Demo.mp4",
-            size_bytes=len(source_path.read_bytes()),
-            content_type="video/mp4",
-        )
-    )
-    completed = videos_svc.complete_upload(
-        CompleteUploadRequest(
-            video_id=upload.video_id,
-            source_key=upload.source_key,
-            upload_id=upload.upload_id,
-            title="Provider Demo.mp4",
-            size_bytes=len(source_path.read_bytes()),
-            content_type="video/mp4",
-            parts=[CompletedPart(part_number=1, etag='"etag-1"')],
-        )
-    )
+    upload = _create_pending_upload()
+    completed = videos_svc.complete_upload(_completion_request(upload))
 
     assert completed.status == VideoStatus.uploaded
+    assert store.completed_multipart == [
+        (
+            upload.source_key,
+            upload.upload_id,
+            [{"PartNumber": 1, "ETag": '"etag-1"'}],
+        )
+    ]
 
     ingest.run_pipeline(upload.video_id)
 
@@ -168,12 +310,12 @@ def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
     assert video.chunk_count == 2
     assert video.error is None
 
-    transcript = objects[video_store.transcript_key(upload.video_id)]
+    transcript = store.objects[video_store.transcript_key(upload.video_id)]
     assert transcript["video_id"] == upload.video_id
     assert transcript["language"] == "en"
     assert len(transcript["segments"]) == 2
 
-    index = objects[video_store.embeddings_key(upload.video_id)]
+    index = store.objects[video_store.embeddings_key(upload.video_id)]
     assert index["video_id"] == upload.video_id
     assert index["model"] == "fake-embedding-001"
     assert index["dim"] == 3
@@ -222,39 +364,48 @@ def test_live_ingest_pipeline_round_trip_against_providers():
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
         pytest.skip("ffmpeg and ffprobe are required for live ingest verification.")
 
-    sample = os.getenv("LIVE_INGEST_VIDEO_PATH")
-    if not sample or not Path(sample).is_file():
-        pytest.skip("Set LIVE_INGEST_VIDEO_PATH to a small speech video file.")
-
-    path = Path(sample)
+    path, content_type = _validated_live_fixture()
+    phase_timeout = _live_timeout_seconds(
+        "LIVE_INGEST_PHASE_TIMEOUT_SECONDS",
+        LIVE_DEFAULT_PHASE_TIMEOUT_SECONDS,
+    )
+    pipeline_timeout = _live_timeout_seconds(
+        "LIVE_INGEST_PIPELINE_TIMEOUT_SECONDS",
+        LIVE_DEFAULT_PIPELINE_TIMEOUT_SECONDS,
+    )
     video_id = f"live-provider-smoke-{uuid.uuid4().hex[:8]}"
-    content_type = mimetypes.guess_type(path.name)[0] or "video/mp4"
     source_key = video_store.source_key(video_id, path.suffix.lstrip(".") or "mp4")
 
     client = get_s3_client()
-    video_store.put_json(
-        video_store.meta_key(video_id),
-        Video(
-            video_id=video_id,
-            title=path.name,
-            status=VideoStatus.uploaded,
-            source_key=source_key,
-            size_bytes=path.stat().st_size,
-            size_human=humanize_bytes(path.stat().st_size),
-            content_type=content_type,
-            created_at=datetime.now(UTC),
-        ).model_dump(mode="json"),
-    )
-
     try:
-        client.upload_file(
-            str(path),
-            settings.b2_bucket_name,
-            source_key,
-            ExtraArgs={"ContentType": content_type},
-        )
+        with _live_phase_deadline("writing live video metadata to B2", phase_timeout):
+            video_store.put_json(
+                video_store.meta_key(video_id),
+                Video(
+                    video_id=video_id,
+                    title=path.name,
+                    status=VideoStatus.uploaded,
+                    source_key=source_key,
+                    size_bytes=path.stat().st_size,
+                    size_human=humanize_bytes(path.stat().st_size),
+                    content_type=content_type,
+                    created_at=datetime.now(UTC),
+                ).model_dump(mode="json"),
+            )
 
-        ingest.run_pipeline(video_id)
+        with _live_phase_deadline("uploading the live fixture to B2", phase_timeout):
+            client.upload_file(
+                str(path),
+                settings.b2_bucket_name,
+                source_key,
+                ExtraArgs={"ContentType": content_type},
+            )
+
+        with _live_phase_deadline(
+            "running ffmpeg, transcription, and embedding pipeline",
+            pipeline_timeout,
+        ):
+            ingest.run_pipeline(video_id)
 
         video = videos_svc.get_video(video_id)
         assert video.status == VideoStatus.ready
@@ -266,17 +417,25 @@ def test_live_ingest_pipeline_round_trip_against_providers():
         index = video_store.get_json(video_store.embeddings_key(video_id))
         assert index and index.get("chunks")
 
-        response = search_svc.search(
-            SearchRequest(
-                question=os.getenv("LIVE_INGEST_QUERY", "What is discussed in this video?"),
-                video_id=video_id,
-                top_k=1,
-                synthesize=bool(settings.anthropic_api_key),
+        with _live_phase_deadline(
+            "running semantic search against live artifacts",
+            phase_timeout,
+        ):
+            response = search_svc.search(
+                SearchRequest(
+                    question=os.getenv("LIVE_INGEST_QUERY", "What is discussed in this video?"),
+                    video_id=video_id,
+                    top_k=1,
+                    synthesize=bool(settings.anthropic_api_key),
+                )
             )
-        )
         assert response.provider_configured is True
         assert response.clips
         if settings.anthropic_api_key:
             assert response.answer
     finally:
-        video_store.delete_video_tree(video_id)
+        with _live_phase_deadline(
+            "deleting temporary live-provider B2 objects",
+            phase_timeout,
+        ):
+            video_store.delete_video_tree(video_id)
