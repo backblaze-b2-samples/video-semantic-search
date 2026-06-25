@@ -4,6 +4,7 @@ listing/status/deletion. Business logic only; all B2 I/O via the repo layer."""
 import math
 import re
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.config import settings
@@ -25,6 +26,12 @@ class VideoNotFoundError(Exception):
     def __init__(self, detail: str = "Video not found"):
         self.detail = detail
         super().__init__(detail)
+
+
+@dataclass(frozen=True)
+class UploadCompletion:
+    video: Video
+    start_pipeline: bool
 
 
 def _slug(filename: str) -> str:
@@ -89,18 +96,18 @@ def create_upload(req: CreateUploadRequest) -> MultipartUpload:
     )
 
 
-def complete_upload(req: CompleteUploadRequest) -> Video:
+def complete_upload(req: CompleteUploadRequest) -> UploadCompletion:
     """Finalize the multipart upload. The runtime layer schedules the pipeline."""
     video = _load(req.video_id)
     if not video:
         raise ValueError("Pending video upload not found")
-    if video.status != VideoStatus.uploading:
-        raise ValueError("Video upload is not pending")
     if video.source_key != req.source_key:
         raise ValueError("source_key does not match pending video upload")
-    if not video.pending_upload_id:
-        raise ValueError("Pending upload id not found; restart the upload")
-    if video.pending_upload_id != req.upload_id:
+
+    if video.status != VideoStatus.uploading:
+        return UploadCompletion(video=video, start_pipeline=False)
+
+    if video.pending_upload_id and video.pending_upload_id != req.upload_id:
         raise ValueError("upload_id does not match pending video upload")
 
     parts = [{"PartNumber": p.part_number, "ETag": p.etag} for p in req.parts]
@@ -110,7 +117,7 @@ def complete_upload(req: CompleteUploadRequest) -> Video:
     video.error = None
     video.pending_upload_id = None
     _save(video)
-    return video
+    return UploadCompletion(video=video, start_pipeline=True)
 
 
 def list_videos() -> list[Video]:

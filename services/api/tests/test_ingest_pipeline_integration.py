@@ -23,10 +23,12 @@ from pathlib import Path
 from queue import Empty
 
 import pytest
+from fastapi import BackgroundTasks
 
 from app.config import settings
 from app.repo import embeddings, llm, media, transcription, video_store
 from app.repo.b2_client import get_s3_client
+from app.runtime import videos as videos_runtime
 from app.service import ingest
 from app.service import search as search_svc
 from app.service import videos as videos_svc
@@ -237,6 +239,31 @@ def _validated_live_fixture() -> tuple[Path, str]:
     return path, content_type
 
 
+def test_live_fixture_rejects_paths_outside_fixture_dir(monkeypatch, tmp_path):
+    secret_path = tmp_path / ".env"
+    secret_path.write_text("OPENAI_API_KEY=secret\n")
+    monkeypatch.setenv("LIVE_INGEST_VIDEO_PATH", str(secret_path))
+
+    with pytest.raises(pytest.fail.Exception, match="vetted fixture"):
+        _validated_live_fixture()
+
+
+def test_live_fixture_rejects_oversized_video(monkeypatch, tmp_path):
+    fixture_dir = tmp_path / "live-ingest"
+    fixture_dir.mkdir()
+    video_path = fixture_dir / "too-large.mp4"
+    with video_path.open("wb") as fh:
+        fh.truncate(LIVE_MAX_FIXTURE_BYTES + 1)
+    monkeypatch.setattr(
+        "tests.test_ingest_pipeline_integration.LIVE_FIXTURE_DIR",
+        fixture_dir,
+    )
+    monkeypatch.setenv("LIVE_INGEST_VIDEO_PATH", str(video_path))
+
+    with pytest.raises(pytest.fail.Exception, match="25 MiB"):
+        _validated_live_fixture()
+
+
 def test_complete_upload_rejects_missing_pending_metadata(monkeypatch):
     store = _install_memory_video_store(monkeypatch)
     request = CompleteUploadRequest(
@@ -286,18 +313,74 @@ def test_complete_upload_rejects_mismatched_upload_id(monkeypatch):
     assert video.pending_upload_id == upload.upload_id
 
 
-def test_complete_upload_rejects_missing_pending_upload_id(monkeypatch):
+def test_complete_upload_allows_legacy_metadata_without_pending_upload_id(monkeypatch):
     store = _install_memory_video_store(monkeypatch)
     upload = _create_pending_upload()
     store.objects[video_store.meta_key(upload.video_id)].pop("pending_upload_id")
 
-    with pytest.raises(ValueError, match="restart the upload"):
-        videos_svc.complete_upload(_completion_request(upload))
+    completion = videos_svc.complete_upload(_completion_request(upload))
 
-    assert store.completed_multipart == []
-    video = videos_svc.get_video(upload.video_id)
-    assert video.status == VideoStatus.uploading
+    assert completion.start_pipeline is True
+    assert store.completed_multipart == [
+        (
+            upload.source_key,
+            upload.upload_id,
+            [{"PartNumber": 1, "ETag": '"etag-1"'}],
+        )
+    ]
+    video = completion.video
+    assert video.status == VideoStatus.uploaded
     assert video.pending_upload_id is None
+
+
+def test_complete_upload_is_idempotent_after_success(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    upload = _create_pending_upload()
+    request = _completion_request(upload)
+
+    first = videos_svc.complete_upload(request)
+    second = videos_svc.complete_upload(request)
+
+    assert first.start_pipeline is True
+    assert second.start_pipeline is False
+    assert second.video.status == VideoStatus.uploaded
+    assert second.video.pending_upload_id is None
+    assert store.completed_multipart == [
+        (
+            upload.source_key,
+            upload.upload_id,
+            [{"PartNumber": 1, "ETag": '"etag-1"'}],
+        )
+    ]
+
+
+async def test_complete_upload_endpoint_skips_pipeline_for_duplicate(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    upload = _create_pending_upload()
+    request = _completion_request(upload)
+    videos_svc.complete_upload(request)
+
+    background_tasks = BackgroundTasks()
+    video = await videos_runtime.complete_upload_endpoint(request, background_tasks)
+
+    assert video.status == VideoStatus.uploaded
+    assert background_tasks.tasks == []
+    assert len(store.completed_multipart) == 1
+
+
+def test_complete_upload_rejects_mismatched_source_after_success(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    upload = _create_pending_upload()
+    videos_svc.complete_upload(_completion_request(upload))
+
+    with pytest.raises(ValueError, match="source_key"):
+        videos_svc.complete_upload(
+            _completion_request(upload, source_key=video_store.source_key("other"))
+        )
+
+    assert len(store.completed_multipart) == 1
+    video = videos_svc.get_video(upload.video_id)
+    assert video.status == VideoStatus.uploaded
 
 
 def test_live_pipeline_deadline_fails_when_child_reports_no_result(monkeypatch):
@@ -385,8 +468,10 @@ def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
     )
 
     upload = _create_pending_upload()
-    completed = videos_svc.complete_upload(_completion_request(upload))
+    completion = videos_svc.complete_upload(_completion_request(upload))
+    completed = completion.video
 
+    assert completion.start_pipeline is True
     assert completed.status == VideoStatus.uploaded
     assert completed.pending_upload_id is None
     assert store.completed_multipart == [
@@ -438,7 +523,7 @@ def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
     assert clip.playback_url == f"https://b2.example/playback/{upload.source_key}"
 
 
-def test_live_ingest_pipeline_round_trip_against_providers():
+def test_live_provider_pipeline_smoke_against_uploaded_source():
     if os.getenv("RUN_LIVE_INGEST_TEST") != "1":
         pytest.skip("Set RUN_LIVE_INGEST_TEST=1 to run the live provider smoke test.")
 
