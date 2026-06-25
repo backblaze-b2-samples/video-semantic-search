@@ -88,7 +88,7 @@ cd services/api
 RUN_LIVE_INGEST_TEST=1 \
 LIVE_INGEST_VIDEO_PATH="$PWD/tests/fixtures/live-ingest/provider-smoke.mp4" \
 LIVE_INGEST_QUERY="What is discussed in this video?" \
-python -m pytest tests/test_ingest_pipeline_integration.py::test_live_provider_pipeline_smoke_against_uploaded_source
+python -m pytest tests/test_live_provider_pipeline_smoke.py::test_live_provider_pipeline_smoke_against_uploaded_source
 ```
 
 The live smoke test stages the sample source object under a temporary

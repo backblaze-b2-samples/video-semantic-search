@@ -82,7 +82,6 @@ export interface Video {
   duration_seconds: number | null;
   chunk_count: number | null;
   error: string | null;
-  pending_upload_id: string | null;
 }
 
 export interface PresignedPart {

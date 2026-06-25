@@ -17,8 +17,8 @@ class VideoStatus(StrEnum):
     failed = "failed"
 
 
-class Video(BaseModel):
-    """A source video and its pipeline state. Persisted to B2 as meta.json."""
+class VideoResponse(BaseModel):
+    """Public video metadata returned by the API."""
 
     video_id: str
     title: str
@@ -31,6 +31,11 @@ class Video(BaseModel):
     duration_seconds: float | None = None
     chunk_count: int | None = None
     error: str | None = None
+
+
+class Video(VideoResponse):
+    """A source video and its pipeline state. Persisted to B2 as meta.json."""
+
     pending_upload_id: str | None = None
 
 

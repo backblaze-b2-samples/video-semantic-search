@@ -47,7 +47,7 @@ Because the browser PUTs to B2 directly, the **bucket CORS policy** must allow `
 - Mocked pipeline round-trip:
   `cd services/api && python -m pytest tests/test_ingest_pipeline_integration.py::test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers`
 - Optional live provider-pipeline smoke check with a vetted fixture in `services/api/tests/fixtures/live-ingest/` (also checks synthesized answers when `ANTHROPIC_API_KEY` is set):
-  `cd services/api && RUN_LIVE_INGEST_TEST=1 LIVE_INGEST_VIDEO_PATH="$PWD/tests/fixtures/live-ingest/provider-smoke.mp4" python -m pytest tests/test_ingest_pipeline_integration.py::test_live_provider_pipeline_smoke_against_uploaded_source`
+  `cd services/api && RUN_LIVE_INGEST_TEST=1 LIVE_INGEST_VIDEO_PATH="$PWD/tests/fixtures/live-ingest/provider-smoke.mp4" python -m pytest tests/test_live_provider_pipeline_smoke.py::test_live_provider_pipeline_smoke_against_uploaded_source`
 - Manual: add a small `.mp4` from the Library; confirm `source.{ext}` + `meta.json` appear under the video's prefix in the bucket (visible in the Files explorer).
 
 ## Related Docs

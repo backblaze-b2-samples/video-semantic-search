@@ -16,5 +16,5 @@ cp ~/approved-fixtures/provider-smoke.mp4 services/api/tests/fixtures/live-inges
 cd services/api
 RUN_LIVE_INGEST_TEST=1 \
 LIVE_INGEST_VIDEO_PATH="$PWD/tests/fixtures/live-ingest/provider-smoke.mp4" \
-python -m pytest tests/test_ingest_pipeline_integration.py::test_live_provider_pipeline_smoke_against_uploaded_source
+python -m pytest tests/test_live_provider_pipeline_smoke.py::test_live_provider_pipeline_smoke_against_uploaded_source
 ```
