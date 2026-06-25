@@ -98,6 +98,8 @@ def complete_upload(req: CompleteUploadRequest) -> Video:
         raise ValueError("Video upload is not pending")
     if video.source_key != req.source_key:
         raise ValueError("source_key does not match pending video upload")
+    if not video.pending_upload_id:
+        raise ValueError("Pending upload id not found; restart the upload")
     if video.pending_upload_id != req.upload_id:
         raise ValueError("upload_id does not match pending video upload")
 

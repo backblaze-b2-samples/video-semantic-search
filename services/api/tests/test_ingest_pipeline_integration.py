@@ -196,7 +196,7 @@ def _run_live_pipeline_with_deadline(video_id: str, seconds: int) -> None:
     try:
         status, detail = result_queue.get_nowait()
     except Empty:
-        return
+        pytest.fail("Live ingest pipeline exited without reporting a result.")
     if status == "error":
         pytest.fail(f"Live ingest pipeline failed: {detail}")
 
@@ -284,6 +284,47 @@ def test_complete_upload_rejects_mismatched_upload_id(monkeypatch):
     video = videos_svc.get_video(upload.video_id)
     assert video.status == VideoStatus.uploading
     assert video.pending_upload_id == upload.upload_id
+
+
+def test_complete_upload_rejects_missing_pending_upload_id(monkeypatch):
+    store = _install_memory_video_store(monkeypatch)
+    upload = _create_pending_upload()
+    store.objects[video_store.meta_key(upload.video_id)].pop("pending_upload_id")
+
+    with pytest.raises(ValueError, match="restart the upload"):
+        videos_svc.complete_upload(_completion_request(upload))
+
+    assert store.completed_multipart == []
+    video = videos_svc.get_video(upload.video_id)
+    assert video.status == VideoStatus.uploading
+    assert video.pending_upload_id is None
+
+
+def test_live_pipeline_deadline_fails_when_child_reports_no_result(monkeypatch):
+    class EmptyQueue:
+        def get_nowait(self):
+            raise Empty
+
+    class SuccessfulProcess:
+        exitcode = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, _timeout):
+            pass
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr("tests.test_ingest_pipeline_integration.Queue", EmptyQueue)
+    monkeypatch.setattr("tests.test_ingest_pipeline_integration.Process", SuccessfulProcess)
+
+    with pytest.raises(pytest.fail.Exception, match="without reporting a result"):
+        _run_live_pipeline_with_deadline("video-id", 1)
 
 
 def test_ingest_pipeline_persists_artifacts_and_searches_with_mocked_providers(
