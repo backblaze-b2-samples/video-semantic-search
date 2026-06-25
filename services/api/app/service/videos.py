@@ -4,6 +4,7 @@ listing/status/deletion. Business logic only; all B2 I/O via the repo layer."""
 import math
 import re
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.config import settings
@@ -27,6 +28,12 @@ class VideoNotFoundError(Exception):
         super().__init__(detail)
 
 
+@dataclass(frozen=True)
+class UploadCompletion:
+    video: Video
+    start_pipeline: bool
+
+
 def _slug(filename: str) -> str:
     base = filename.rsplit("/", 1)[-1]
     if "." in base:
@@ -45,9 +52,7 @@ def _load(video_id: str) -> Video | None:
 
 
 def _save(video: Video) -> None:
-    video_store.put_json(
-        video_store.meta_key(video.video_id), video.model_dump(mode="json")
-    )
+    video_store.put_json(video_store.meta_key(video.video_id), video.model_dump(mode="json"))
 
 
 def create_upload(req: CreateUploadRequest) -> MultipartUpload:
@@ -55,9 +60,7 @@ def create_upload(req: CreateUploadRequest) -> MultipartUpload:
     if req.size_bytes <= 0:
         raise ValueError("size_bytes must be positive")
     if req.size_bytes > settings.max_video_size:
-        raise ValueError(
-            f"Video exceeds the max size of {humanize_bytes(settings.max_video_size)}"
-        )
+        raise ValueError(f"Video exceeds the max size of {humanize_bytes(settings.max_video_size)}")
 
     video_id = f"{_slug(req.filename)}-{secrets.token_hex(3)}"
     key = video_store.source_key(video_id, _ext(req.filename))
@@ -66,9 +69,7 @@ def create_upload(req: CreateUploadRequest) -> MultipartUpload:
     part_size = settings.multipart_part_size
     num_parts = max(1, math.ceil(req.size_bytes / part_size))
     parts = [
-        PresignedPart(
-            part_number=n, url=video_store.presign_part(key, upload_id, n)
-        )
+        PresignedPart(part_number=n, url=video_store.presign_part(key, upload_id, n))
         for n in range(1, num_parts + 1)
     ]
 
@@ -83,6 +84,7 @@ def create_upload(req: CreateUploadRequest) -> MultipartUpload:
             size_human=humanize_bytes(req.size_bytes),
             content_type=req.content_type,
             created_at=datetime.now(UTC),
+            pending_upload_id=upload_id,
         )
     )
     return MultipartUpload(
@@ -94,25 +96,28 @@ def create_upload(req: CreateUploadRequest) -> MultipartUpload:
     )
 
 
-def complete_upload(req: CompleteUploadRequest) -> Video:
+def complete_upload(req: CompleteUploadRequest) -> UploadCompletion:
     """Finalize the multipart upload. The runtime layer schedules the pipeline."""
+    video = _load(req.video_id)
+    if not video:
+        raise ValueError("Pending video upload not found")
+    if video.source_key != req.source_key:
+        raise ValueError("source_key does not match pending video upload")
+
+    if video.status != VideoStatus.uploading:
+        return UploadCompletion(video=video, start_pipeline=False)
+
+    if video.pending_upload_id and video.pending_upload_id != req.upload_id:
+        raise ValueError("upload_id does not match pending video upload")
+
     parts = [{"PartNumber": p.part_number, "ETag": p.etag} for p in req.parts]
     video_store.complete_multipart(req.source_key, req.upload_id, parts)
 
-    video = _load(req.video_id) or Video(
-        video_id=req.video_id,
-        title=req.title,
-        status=VideoStatus.uploaded,
-        source_key=req.source_key,
-        size_bytes=req.size_bytes,
-        size_human=humanize_bytes(req.size_bytes),
-        content_type=req.content_type,
-        created_at=datetime.now(UTC),
-    )
     video.status = VideoStatus.uploaded
     video.error = None
+    video.pending_upload_id = None
     _save(video)
-    return video
+    return UploadCompletion(video=video, start_pipeline=True)
 
 
 def list_videos() -> list[Video]:

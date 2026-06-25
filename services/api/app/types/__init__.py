@@ -16,6 +16,7 @@ from app.types.video import (
     MultipartUpload,
     PresignedPart,
     Video,
+    VideoResponse,
     VideoStatus,
 )
 
@@ -39,5 +40,6 @@ __all__ = [
     "TranscriptSegment",
     "UploadStats",
     "Video",
+    "VideoResponse",
     "VideoStatus",
 ]

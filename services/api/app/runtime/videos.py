@@ -12,14 +12,14 @@ from app.service.videos import (
     list_videos,
     playback_url,
 )
-from app.types import CompleteUploadRequest, CreateUploadRequest, MultipartUpload, Video
+from app.types import CompleteUploadRequest, CreateUploadRequest, MultipartUpload, VideoResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-@router.get("/videos", response_model=list[Video])
+@router.get("/videos", response_model=list[VideoResponse])
 async def list_videos_endpoint():
     return list_videos()
 
@@ -32,18 +32,20 @@ async def create_upload_endpoint(req: CreateUploadRequest):
         raise HTTPException(status_code=400, detail=str(e)) from None
 
 
-@router.post("/videos/uploads/complete", response_model=Video)
-async def complete_upload_endpoint(
-    req: CompleteUploadRequest, background_tasks: BackgroundTasks
-):
-    video = complete_upload(req)
-    # Kick the transcription/embedding pipeline off the request path.
-    background_tasks.add_task(ingest.run_pipeline, video.video_id)
-    logger.info("Video upload completed: video_id=%s", video.video_id)
-    return video
+@router.post("/videos/uploads/complete", response_model=VideoResponse)
+async def complete_upload_endpoint(req: CompleteUploadRequest, background_tasks: BackgroundTasks):
+    try:
+        completion = complete_upload(req)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
+    if completion.start_pipeline:
+        # Kick the transcription/embedding pipeline off the request path.
+        background_tasks.add_task(ingest.run_pipeline, completion.video.video_id)
+        logger.info("Video upload completed: video_id=%s", completion.video.video_id)
+    return completion.video
 
 
-@router.get("/videos/{video_id}", response_model=Video)
+@router.get("/videos/{video_id}", response_model=VideoResponse)
 async def get_video_endpoint(video_id: str):
     try:
         return get_video(video_id)
@@ -59,7 +61,7 @@ async def playback_endpoint(video_id: str):
         raise HTTPException(status_code=404, detail=e.detail) from None
 
 
-@router.post("/videos/{video_id}/reindex", response_model=Video)
+@router.post("/videos/{video_id}/reindex", response_model=VideoResponse)
 async def reindex_endpoint(video_id: str, background_tasks: BackgroundTasks):
     try:
         video = get_video(video_id)
