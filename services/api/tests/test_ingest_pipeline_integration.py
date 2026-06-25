@@ -18,7 +18,9 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from multiprocessing import Process, Queue
 from pathlib import Path
+from queue import Empty
 
 import pytest
 
@@ -58,7 +60,7 @@ class MemoryVideoStore:
     completed_multipart: list[tuple[str, str, list[dict]]] = field(default_factory=list)
 
 
-class LivePhaseTimeoutError(BaseException):
+class LivePhaseTimeoutError(Exception):
     pass
 
 
@@ -145,7 +147,7 @@ def _live_timeout_seconds(env_name: str, default: int) -> int:
 @contextmanager
 def _live_phase_deadline(phase: str, seconds: int):
     if not hasattr(signal, "SIGALRM"):
-        pytest.fail("Live provider smoke test requires signal.SIGALRM for deadlines.")
+        pytest.skip("Live provider smoke test deadlines require signal.SIGALRM.")
 
     def timeout_handler(_signum, _frame):
         raise LivePhaseTimeoutError(f"Timed out after {seconds}s while {phase}.")
@@ -160,6 +162,43 @@ def _live_phase_deadline(phase: str, seconds: int):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _run_pipeline_for_live_test(video_id: str, result_queue) -> None:
+    try:
+        ingest.run_pipeline(video_id)
+    except Exception as exc:
+        result_queue.put(("error", repr(exc)))
+    else:
+        result_queue.put(("ok", None))
+
+
+def _run_live_pipeline_with_deadline(video_id: str, seconds: int) -> None:
+    result_queue = Queue()
+    process = Process(
+        target=_run_pipeline_for_live_test,
+        args=(video_id, result_queue),
+        daemon=True,
+    )
+    process.start()
+    process.join(seconds)
+    if process.is_alive():
+        process.terminate()
+        process.join(10)
+        pytest.fail(
+            "Timed out after "
+            f"{seconds}s while running ffmpeg, transcription, and embedding pipeline."
+        )
+    if process.exitcode != 0:
+        pytest.fail(
+            f"Live ingest pipeline process exited with code {process.exitcode} before completing."
+        )
+    try:
+        status, detail = result_queue.get_nowait()
+    except Empty:
+        return
+    if status == "error":
+        pytest.fail(f"Live ingest pipeline failed: {detail}")
 
 
 def _validated_live_fixture() -> tuple[Path, str]:
@@ -401,11 +440,7 @@ def test_live_ingest_pipeline_round_trip_against_providers():
                 ExtraArgs={"ContentType": content_type},
             )
 
-        with _live_phase_deadline(
-            "running ffmpeg, transcription, and embedding pipeline",
-            pipeline_timeout,
-        ):
-            ingest.run_pipeline(video_id)
+        _run_live_pipeline_with_deadline(video_id, pipeline_timeout)
 
         video = videos_svc.get_video(video_id)
         assert video.status == VideoStatus.ready
